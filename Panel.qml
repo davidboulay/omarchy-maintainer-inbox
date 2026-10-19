@@ -114,6 +114,11 @@ Panel {
     function status(): string { return inbox.summaryText }
     function count(): string { return String(inbox.needsCount) }
     function testNotification(): string { return inbox.testNotification() }
+    function debug(): string {
+      return JSON.stringify({ loaded: inbox.loaded, loading: inbox.loading, stale: inbox.stale, lastError: inbox.lastError,
+        lastSuccessSec: inbox.lastSuccessSec, startedSec: inbox.startedSec, nowSec: inbox.nowSec,
+        staleAfterMin: inbox.staleAfterMin, items: inbox.items.length, needs: inbox.needsCount })
+    }
   }
 
   WidgetButton {
