@@ -58,6 +58,7 @@ GH = find_gh()
 GH_TIMEOUT = 25
 MAX_PAGES = 5          # 500 open items is far past what one maintainer can triage
 LOGIN_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$")
+TRANSIENT_RE = re.compile(r"timeout|unexpected EOF|connection reset|connection refused|no such host|temporarily|502|503|504", re.IGNORECASE)
 REPO_RE = re.compile(r"^[A-Za-z0-9._-]{1,100}$")
 
 QUERY = """
@@ -142,12 +143,20 @@ def gh_graphql(q, cursor, query=QUERY):
         cmd += ["-f", "q=" + q]
     if cursor:
         cmd += ["-f", "cursor=" + cursor]
-    try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=GH_TIMEOUT)
-    except FileNotFoundError:
-        fail("GitHub CLI (gh) is not installed")
-    except subprocess.TimeoutExpired:
-        fail("GitHub did not answer within %ds" % GH_TIMEOUT)
+    # One retry: a single dropped TLS handshake on a weak connection (phone
+    # hotspot, hotel Wi-Fi) should not fail the whole check.
+    for attempt in (1, 2):
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=GH_TIMEOUT)
+        except FileNotFoundError:
+            fail("GitHub CLI (gh) is not installed")
+        except subprocess.TimeoutExpired:
+            if attempt == 2:
+                fail("GitHub did not answer within %ds" % GH_TIMEOUT)
+            continue
+        if proc.returncode == 0 or attempt == 2 or not TRANSIENT_RE.search(proc.stderr or ""):
+            break
+        time.sleep(3)
     if proc.returncode != 0:
         err = (proc.stderr or proc.stdout).strip().splitlines()
         msg = err[-1] if err else "gh exited %d" % proc.returncode
