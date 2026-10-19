@@ -58,6 +58,7 @@ GH = find_gh()
 GH_TIMEOUT = 25
 MAX_PAGES = 5          # 500 open items is far past what one maintainer can triage
 LOGIN_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$")
+REPO_RE = re.compile(r"^[A-Za-z0-9._-]{1,100}$")
 
 QUERY = """
 query($q: String!, $cursor: String) {
@@ -71,14 +72,14 @@ query($q: String!, $cursor: String) {
         id number title url createdAt
         repository { nameWithOwner }
         author { __typename login }
-        comments(last: 30) { nodes { author { login } createdAt } }
+        comments(last: 30) { nodes { author { __typename login } createdAt } }
       }
       ... on PullRequest {
         id number title url createdAt isDraft
         repository { nameWithOwner }
         author { __typename login }
-        comments(last: 30) { nodes { author { login } createdAt } }
-        reviews(last: 30) { nodes { author { login } submittedAt } }
+        comments(last: 30) { nodes { author { __typename login } createdAt } }
+        reviews(last: 30) { nodes { author { __typename login } submittedAt } }
         commits(last: 1) { nodes { commit { committedDate author { user { login } } } } }
       }
     }
@@ -118,6 +119,7 @@ def locked_state(path):
             state = {}
         state.setdefault("seen", {})
         state.setdefault("dismissed", {})
+        state.setdefault("muted", {})
         yield state
         fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".state-")
         with os.fdopen(fd, "w") as f:
@@ -161,10 +163,15 @@ def gh_graphql(q, cursor, query=QUERY):
     return data["data"]
 
 
+BOT_LOGIN_RE = re.compile(r"(\[bot\]|[-_]?bot|-apps)$", re.IGNORECASE)
+
+
 def is_bot(author):
+    """GitHub Apps are typed Bot; plenty of bots are plain user accounts named
+    like one (omarchybot, greptile-apps), so the name counts too."""
     if not author:
         return False
-    return author.get("__typename") == "Bot" or str(author.get("login", "")).endswith("[bot]")
+    return author.get("__typename") == "Bot" or bool(BOT_LOGIN_RE.search(str(author.get("login", ""))))
 
 
 def activity(node, me):
@@ -186,16 +193,23 @@ def activity(node, me):
         elif other[0] is None or at > other[0]:
             other = (at, login)
 
+    # Opening the item always counts, even by a bot (a Dependabot PR on your
+    # repo is work). Bot comments and reviews never do: CI summaries and AI
+    # reviewers are not someone waiting for an answer.
     note((node.get("author") or {}).get("login"), node.get("createdAt"))
     for c in (node.get("comments") or {}).get("nodes") or []:
-        note((c.get("author") or {}).get("login"), c.get("createdAt"))
+        if not is_bot(c.get("author")):
+            note((c.get("author") or {}).get("login"), c.get("createdAt"))
     for r in (node.get("reviews") or {}).get("nodes") or []:
-        note((r.get("author") or {}).get("login"), r.get("submittedAt"))
+        if not is_bot(r.get("author")):
+            note((r.get("author") or {}).get("login"), r.get("submittedAt"))
     for c in (node.get("commits") or {}).get("nodes") or []:
         commit = c.get("commit") or {}
         user = ((commit.get("author") or {}).get("user") or {}).get("login")
-        # A commit with no linked GitHub user is someone else's push.
-        note(user or "unknown", commit.get("committedDate"))
+        # A commit with no linked GitHub user is someone else's push; a bot's
+        # (rebases, formatting) is not.
+        if not is_bot({"login": user or ""}):
+            note(user or "unknown", commit.get("committedDate"))
     return other[0], other[1], mine
 
 
@@ -221,58 +235,97 @@ def build_item(node, me):
     }
 
 
-def classify(item, dismissed):
+def classify(item, state):
+    if item["id"] in state["muted"]:
+        return "muted"
     if item["lastMineAt"] and item["lastMineAt"] >= item["lastOtherAt"]:
         return "waiting"
-    d = dismissed.get(item["id"])
+    d = state["dismissed"].get(item["id"])
     if d and d >= item["lastOtherAt"]:
         return "dismissed"
     return "needs"
 
 
-def collect(args):
-    owners = [o.strip() for o in (args.owners or "").split(",") if o.strip()]
-    for o in owners:
-        if not LOGIN_RE.match(o):
-            fail("not a GitHub user or organization name: %r" % o)
-
-    me = viewer_login()
-    if me.lower() not in [o.lower() for o in owners]:
-        owners = [me] + owners
-
-    q = "is:open archived:false " + " ".join("user:" + o for o in owners)
+def search_all(q):
     nodes, cursor, total = [], None, 0
     for _ in range(MAX_PAGES):
-        data = gh_graphql(q, cursor)
-        search = data["search"]
+        search = gh_graphql(q, cursor)["search"]
         total = search["issueCount"]
         nodes += [n for n in search["nodes"] if n and n.get("id")]
         if not search["pageInfo"]["hasNextPage"]:
             break
         cursor = search["pageInfo"]["endCursor"]
+    return nodes, total > len(nodes)
 
-    items = []
-    for n in nodes:
-        item = build_item(n, me)
-        if item is None:
+
+def parse_watch(raw):
+    """Extra entries: an owner ("lojel") watches all of its repositories,
+    owner/name ("lojel/lojel-wp") just that one."""
+    owners, repos = [], []
+    for entry in (raw or "").split(","):
+        entry = entry.strip().strip("/")
+        if not entry:
             continue
-        if args.exclude_bots and item["bot"]:
-            continue
-        items.append(item)
+        parts = entry.split("/")
+        if len(parts) == 1 and LOGIN_RE.match(parts[0]):
+            owners.append(parts[0])
+        elif len(parts) == 2 and LOGIN_RE.match(parts[0]) and REPO_RE.match(parts[1]):
+            repos.append(entry)
+        else:
+            fail("not an owner or owner/repo: %r" % entry)
+    return owners, repos
+
+
+def collect(args):
+    owners, repos = parse_watch(args.owners)
+    me = viewer_login()
+    if me.lower() not in [o.lower() for o in owners]:
+        owners = [me] + owners
+
+    # Qualifiers of one kind are OR-ed, but user: and repo: together are not,
+    # so owners and single repositories are separate searches.
+    base = "is:open archived:false "
+    owned, truncated = search_all(base + " ".join("user:" + o for o in owners))
+    if repos:
+        more, t = search_all(base + " ".join("repo:" + r for r in repos))
+        owned += more
+        truncated = truncated or t
+    participating = []
+    if args.participating:
+        # Conversations elsewhere: anything you opened, commented on, were
+        # mentioned or assigned in.
+        participating, t = search_all(base + "involves:" + me)
+        truncated = truncated or t
+
+    items, ids = [], set()
+    for source, nodes in (("owned", owned), ("participating", participating)):
+        for n in nodes:
+            if n["id"] in ids:
+                continue
+            ids.add(n["id"])
+            item = build_item(n, me)
+            if item is None:
+                continue
+            if source == "owned" and args.exclude_bots and item["bot"]:
+                continue
+            item["source"] = source
+            items.append(item)
 
     with locked_state(args.state) as state:
+        state.setdefault("muted", {})
         fresh = []
-        open_ids = set()
         for item in items:
-            open_ids.add(item["id"])
-            item["state"] = classify(item, state["dismissed"])
+            item["state"] = classify(item, state)
             seen = state["seen"].get(item["id"])
             if item["state"] == "needs" and (seen is None or item["lastOtherAt"] > seen):
                 fresh.append(item["id"])
             state["seen"][item["id"]] = item["lastOtherAt"]
-        # Forget closed items so state cannot grow without bound.
-        for key in ("seen", "dismissed"):
-            state[key] = {k: v for k, v in state[key].items() if k in open_ids}
+        # Forget closed items so state cannot grow without bound. With
+        # conversations switched off their mutes are kept, not lost.
+        for key in ("seen", "dismissed", "muted"):
+            if key == "muted" and not args.participating:
+                continue
+            state[key] = {k: v for k, v in state[key].items() if k in ids}
         state["lastSuccess"] = int(time.time())
 
     items.sort(key=lambda i: i["lastOtherAt"], reverse=True)
@@ -280,21 +333,24 @@ def collect(args):
         "ok": True,
         "viewer": me,
         "owners": owners,
+        "repos": repos,
         "generatedAt": int(time.time()),
-        "total": total,
-        "truncated": total > len(nodes),
+        "truncated": truncated,
         "items": items,
         "fresh": fresh,
     })
 
 
-def dismiss(args, on):
+def set_flag(args, key, on):
     with locked_state(args.state) as state:
-        if on:
+        state.setdefault("muted", {})
+        if not on:
+            state[key].pop(args.id, None)
+        elif key == "dismissed":
             # Dismiss up to "now", so only activity after this moment brings it back.
-            state["dismissed"][args.id] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            state[key][args.id] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         else:
-            state["dismissed"].pop(args.id, None)
+            state[key][args.id] = True
     emit({"ok": True})
 
 
@@ -305,15 +361,18 @@ def main():
     c.add_argument("--state", required=True)
     c.add_argument("--owners", default="")
     c.add_argument("--exclude-bots", action="store_true")
-    for name in ("dismiss", "restore"):
+    c.add_argument("--participating", action="store_true")
+    for name in ("dismiss", "restore", "mute", "unmute"):
         d = sub.add_parser(name)
         d.add_argument("--state", required=True)
         d.add_argument("--id", required=True)
     args = p.parse_args()
     if args.cmd == "collect":
         collect(args)
+    elif args.cmd in ("dismiss", "restore"):
+        set_flag(args, "dismissed", args.cmd == "dismiss")
     else:
-        dismiss(args, args.cmd == "dismiss")
+        set_flag(args, "muted", args.cmd == "mute")
 
 
 if __name__ == "__main__":

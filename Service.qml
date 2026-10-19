@@ -34,6 +34,7 @@ Item {
   readonly property int refreshIntervalMin: intSetting("refreshIntervalMin", 5, 1, 120)
   readonly property string owners: String(setting("owners", ""))
   readonly property bool excludeBots: boolSetting("excludeBots", false)
+  readonly property bool participating: boolSetting("participating", true)
   readonly property bool notify: boolSetting("notify", true)
   readonly property bool hideWhenEmpty: boolSetting("hideWhenEmpty", false)
   readonly property int staleAfterMin: intSetting("staleAfterMin", 60, 10, 1440)
@@ -47,6 +48,9 @@ Item {
   }
 
   readonly property var needs: items.filter(function (i) { return i.state === "needs" })
+  readonly property var needsOwned: needs.filter(function (i) { return i.source !== "participating" })
+  readonly property var needsReplies: needs.filter(function (i) { return i.source === "participating" })
+  readonly property var muted: items.filter(function (i) { return i.state === "muted" })
   readonly property var waiting: items.filter(function (i) { return i.state === "waiting" })
   readonly property var dismissed: items.filter(function (i) { return i.state === "dismissed" })
   readonly property int needsCount: needs.length
@@ -99,6 +103,7 @@ Item {
     var cmd = [pythonPath, helperPath, "collect", "--state", statePath]
     if (owners.trim() !== "") cmd.push("--owners", owners.trim())
     if (excludeBots) cmd.push("--exclude-bots")
+    if (participating) cmd.push("--participating")
     collector.command = cmd
     watchdog.restart()
     collector.running = true
@@ -149,12 +154,21 @@ Item {
                        Object.keys(repos).join(", "), "")
       return
     }
-    fresh.forEach(function (f) {
-      var what = f.kind === "pr" ? "Pull request" : "Issue"
-      var verb = f.lastOtherAt === f.createdAt ? " opened by " : " · new activity from "
-      sendNotification(f.repo.split("/")[1] + " #" + f.number + ": " + f.title,
-                       what + verb + f.lastOtherBy, f.url)
-    })
+    fresh.forEach(notifyItem)
+  }
+
+  function notifyItem(f) {
+    var what = f.kind === "pr" ? "Pull request" : "Issue"
+    var body = f.source === "participating" ? "New reply from " + f.lastOtherBy + " · " + f.repo
+      : what + (f.lastOtherAt === f.createdAt ? " opened by " : " · new activity from ") + f.lastOtherBy
+    sendNotification(f.repo.split("/")[1] + " #" + f.number + ": " + f.title, body, f.url)
+  }
+
+  // Re-sends the newest waiting item, to check the notification click.
+  function testNotification() {
+    if (needs.length > 0) { notifyItem(needs[0]); return "sent: " + needs[0].url }
+    sendNotification("Maintainer Inbox test", "Nothing is waiting on you; clicking opens the inbox.", "")
+    return "sent: summary"
   }
 
   Component {
@@ -188,26 +202,34 @@ Item {
     Qt.openUrlExternally(url)
   }
 
-  function setDismissed(item, on) {
+  function setDismissed(item, on) { _setFlag(item, on ? "dismiss" : "restore", on ? "dismissed" : "needs") }
+
+  // Muting is for good: unlike a dismissal, new activity does not bring it back.
+  function setMuted(item, on) { _setFlag(item, on ? "mute" : "unmute", on ? "muted" : "needs") }
+
+  function _setFlag(item, command, newState) {
     if (!item || typeof item.id !== "string" || !findItem(item.id)) return
     // Move it locally at once; the helper persists it and the next collect
-    // agrees by construction.
+    // settles the real state (an unmuted item may be "waiting", not "needs").
     items = items.map(function (i) {
       if (i.id !== item.id) return i
       var copy = Object.assign({}, i)
-      copy.state = on ? "dismissed" : "needs"
+      copy.state = newState
       return copy
     })
     var p = dismissProcess.createObject(root)
-    p.command = [pythonPath, helperPath, on ? "dismiss" : "restore", "--state", statePath, "--id", item.id]
+    p.command = [pythonPath, helperPath, command, "--state", statePath, "--id", item.id]
     p.running = true
+    if (command === "unmute" || command === "restore") settle.restart()
   }
+
+  Timer { id: settle; interval: 1500; repeat: false; onTriggered: root.refresh() }
 
   Component {
     id: dismissProcess
     Process {
       onExited: function (code) {
-        if (code !== 0) root.lastError = "Could not save the dismissal (exit " + code + ")"
+        if (code !== 0) root.lastError = "Could not save the change (exit " + code + ")"
         destroy()
       }
     }
@@ -304,6 +326,7 @@ Item {
 
   onOwnersChanged: refresh()
   onExcludeBotsChanged: refresh()
+  onParticipatingChanged: refresh()
 
   Component.onDestruction: {
     watchdog.stop()

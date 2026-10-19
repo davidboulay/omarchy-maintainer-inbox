@@ -21,6 +21,7 @@ Panel {
   property bool showSettings: false
   property bool showWaiting: false
   property bool showDismissed: false
+  property bool showMuted: false
 
   readonly property color foreground: bar ? bar.foreground : Color.foreground
   readonly property color urgent: bar ? bar.urgent : Color.urgent
@@ -32,9 +33,11 @@ Panel {
     : (inbox.needsCount > 0 ? glyph + " " + inbox.needsCount : glyph)
 
   // Keyboard order: what is on screen, top to bottom.
-  readonly property var rows: inbox.needs
+  readonly property var rows: inbox.needsOwned
+    .concat(inbox.needsReplies)
     .concat(showWaiting ? inbox.waiting : [])
     .concat(showDismissed ? inbox.dismissed : [])
+    .concat(showMuted ? inbox.muted : [])
 
   // Also read by the unified tray.
   readonly property bool attention: inbox.attention
@@ -66,7 +69,8 @@ Panel {
 
   function detail(item) {
     var who = item.lastOtherAt === item.createdAt ? "opened by " : "last from "
-    var text = item.repo.split("/")[1] + " #" + item.number + " · " + who + item.lastOtherBy + " · " + age(item.lastOtherAt) + " ago"
+    var repo = item.source === "participating" || item.repo.split("/")[0] !== inbox.viewer ? item.repo : item.repo.split("/")[1]
+    var text = repo + " #" + item.number + " · " + who + item.lastOtherBy + " · " + age(item.lastOtherAt) + " ago"
     if (item.state === "waiting") text += " · you replied " + age(item.lastMineAt) + " ago"
     if (item.draft) text += " · draft"
     return text
@@ -109,6 +113,7 @@ Panel {
     function refresh(): string { inbox.refresh(); return "ok" }
     function status(): string { return inbox.summaryText }
     function count(): string { return String(inbox.needsCount) }
+    function testNotification(): string { return inbox.testNotification() }
   }
 
   WidgetButton {
@@ -128,7 +133,7 @@ Panel {
   component ItemRow: CursorSurface {
     id: row
     required property var item
-    required property int rowIndex
+    readonly property int rowIndex: root.rows.indexOf(item)
 
     width: parent ? parent.width : 0
     implicitHeight: rowLayout.implicitHeight + Style.space(12)
@@ -189,7 +194,16 @@ Panel {
 
       PanelActionButton {
         Layout.alignment: Qt.AlignVCenter
-        visible: row.item.state !== "waiting"
+        iconText: row.item.state === "muted" ? "󰂚" : "󰂛"
+        tooltipText: row.item.state === "muted" ? "Unmute (m)" : "Mute: never show or notify again (m)"
+        foreground: root.foreground
+        fontFamily: root.fontFamily
+        onClicked: inbox.setMuted(row.item, row.item.state !== "muted")
+      }
+
+      PanelActionButton {
+        Layout.alignment: Qt.AlignVCenter
+        visible: row.item.state === "needs" || row.item.state === "dismissed"
         iconText: row.item.state === "dismissed" ? "󰑐" : "󰅖"
         tooltipText: row.item.state === "dismissed" ? "Bring back (d)" : "Dismiss until new activity (d)"
         foreground: root.foreground
@@ -219,7 +233,9 @@ Panel {
       onTextKey: function (t) {
         var s = root.selected()
         if (t === "r" || t === "R") inbox.refresh()
-        else if ((t === "d" || t === "D") && s && s.state !== "waiting") inbox.setDismissed(s, s.state !== "dismissed")
+        else if ((t === "d" || t === "D") && s && (s.state === "needs" || s.state === "dismissed")) inbox.setDismissed(s, s.state !== "dismissed")
+        else if ((t === "m" || t === "M") && s) inbox.setMuted(s, s.state !== "muted")
+        else if (t === "u" || t === "U") root.showMuted = !root.showMuted
         else if (t === "w" || t === "W") root.showWaiting = !root.showWaiting
         else if (t === "h" || t === "H") root.showDismissed = !root.showDismissed
         else if (t === ",") root.showSettings = !root.showSettings
@@ -245,7 +261,7 @@ Panel {
             width: parent.width
             title: "Maintainer inbox"
             meta: inbox.summaryText
-            detail: inbox.viewer !== "" ? "Open issues and PRs on repos owned by " + (inbox.owners.trim() !== "" ? inbox.viewer + ", " + inbox.owners : inbox.viewer) : ""
+            detail: inbox.viewer !== "" ? "Watching " + (inbox.owners.trim() !== "" ? inbox.viewer + ", " + inbox.owners : inbox.viewer) + (inbox.participating ? " and your conversations" : "") : ""
             foreground: root.foreground
             fontFamily: root.fontFamily
             iconComponent: Component {
@@ -294,7 +310,7 @@ Panel {
             TextField {
               width: parent.width
               foreground: root.foreground
-              placeholderText: "Extra owners or organizations, comma-separated"
+              placeholderText: "Also watch: lojel, lojel/lojel-wp, …"
               text: inbox.owners
               onAccepted: inbox.saveSetting("owners", text, false)
               Keys.onEscapePressed: root.showSettings = false
@@ -303,11 +319,21 @@ Panel {
             Text {
               textFormat: Text.PlainText
               width: parent.width
-              text: "Your own account is always included. Press Enter to apply."
+              text: "Comma-separated. An owner or organization covers all its repositories; owner/repo just that one. Your own account is always included. Press Enter to apply."
               color: root.dim
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
               wrapMode: Text.WordWrap
+            }
+
+            Toggle {
+              width: parent.width
+              label: "Replies in your conversations"
+              description: "Issues and PRs anywhere on GitHub that you opened, commented on, or were mentioned or assigned in, when someone answers after you. Mute the ones you're done with."
+              checked: inbox.participating
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              onClicked: inbox.saveSetting("participating", inbox.participating ? "false" : "true", true)
             }
 
             Toggle {
@@ -383,13 +409,13 @@ Panel {
             spacing: Style.space(6)
 
             PanelSectionHeader {
-              text: "NEEDS YOU · " + inbox.needs.length
+              text: "ON YOUR REPOS · " + inbox.needsOwned.length
               foreground: root.foreground
               fontFamily: root.fontFamily
             }
 
             Text {
-              visible: inbox.needs.length === 0
+              visible: inbox.needsOwned.length === 0
               textFormat: Text.PlainText
               width: parent.width
               text: "Nothing is waiting on you."
@@ -399,8 +425,22 @@ Panel {
             }
 
             Repeater {
-              model: inbox.needs
-              ItemRow { required property var modelData; required property int index; item: modelData; rowIndex: index }
+              model: inbox.needsOwned
+              ItemRow { required property var modelData; item: modelData }
+            }
+
+            PanelSeparator { visible: inbox.needsReplies.length > 0; foreground: root.foreground }
+
+            PanelSectionHeader {
+              visible: inbox.needsReplies.length > 0
+              text: "REPLIES TO YOU · " + inbox.needsReplies.length
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+            }
+
+            Repeater {
+              model: inbox.needsReplies
+              ItemRow { required property var modelData; item: modelData }
             }
 
             PanelSeparator { visible: inbox.waiting.length > 0; foreground: root.foreground }
@@ -422,7 +462,7 @@ Panel {
 
             Repeater {
               model: root.showWaiting ? inbox.waiting : []
-              ItemRow { required property var modelData; required property int index; item: modelData; rowIndex: inbox.needs.length + index }
+              ItemRow { required property var modelData; item: modelData }
             }
 
             CursorSurface {
@@ -442,11 +482,27 @@ Panel {
 
             Repeater {
               model: root.showDismissed ? inbox.dismissed : []
-              ItemRow {
-                required property var modelData; required property int index
-                item: modelData
-                rowIndex: inbox.needs.length + (root.showWaiting ? inbox.waiting.length : 0) + index
+              ItemRow { required property var modelData; item: modelData }
+            }
+
+            CursorSurface {
+              visible: inbox.muted.length > 0
+              width: parent.width
+              implicitHeight: mutedHeader.implicitHeight + Style.space(8)
+              foreground: root.foreground
+              MouseArea { anchors.fill: parent; onClicked: root.showMuted = !root.showMuted }
+              PanelSectionHeader {
+                id: mutedHeader
+                anchors.verticalCenter: parent.verticalCenter
+                text: (root.showMuted ? "▾ " : "▸ ") + "MUTED · " + inbox.muted.length
+                foreground: root.foreground
+                fontFamily: root.fontFamily
               }
+            }
+
+            Repeater {
+              model: root.showMuted ? inbox.muted : []
+              ItemRow { required property var modelData; item: modelData }
             }
           }
 
@@ -456,7 +512,7 @@ Panel {
             textFormat: Text.PlainText
             visible: !root.showSettings
             width: parent.width
-            text: "j/k select · enter open · d dismiss · w waiting · h dismissed · r refresh · , settings"
+            text: "j/k select · enter open · d dismiss · m mute · w waiting · h dismissed · u muted · r refresh · , settings"
             color: root.dim
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
