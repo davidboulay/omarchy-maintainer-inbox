@@ -55,14 +55,17 @@ Item {
   readonly property var dismissed: items.filter(function (i) { return i.state === "dismissed" })
   readonly property int needsCount: needs.length
   // No successful check for too long: say so instead of showing a calm zero.
-  readonly property bool stale: lastSuccessSec > 0
-    ? (nowSec - lastSuccessSec) > staleAfterMin * 60
-    : (lastError !== "" && !loading)
+  // Counted from startup until the first success, so one blip while the
+  // network comes up after login or resume doesn't turn the bar red.
+  readonly property double startedSec: Date.now() / 1000
+  readonly property bool stale: lastError !== ""
+    && (nowSec - (lastSuccessSec > 0 ? lastSuccessSec : startedSec)) > staleAfterMin * 60
   // Read by the unified tray ("attention": "attention").
   readonly property bool attention: needsCount > 0 || stale
 
   readonly property string summaryText: {
-    if (stale) return "Can't reach GitHub" + (lastError !== "" ? ": " + lastError : "")
+    if (stale) return "Can't reach GitHub: " + lastError
+    if (!loaded && lastError !== "") return "Retrying: " + lastError
     if (!loaded) return "Checking…"
     if (needsCount === 0) return "Nothing waiting on you"
     return needsCount + (needsCount === 1 ? " item needs you" : " items need you")
@@ -116,6 +119,10 @@ Item {
     if (isErr) _err = cur + chunk
     else _out = cur + chunk
   }
+
+  // A failed check is retried after a minute rather than at the next poll.
+  onLastErrorChanged: if (lastError !== "") retry.restart()
+  Timer { id: retry; interval: 60000; repeat: false; onTriggered: root.refresh() }
 
   function apply(raw) {
     var data
