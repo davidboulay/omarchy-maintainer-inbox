@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.davidboulay.maintainer-inbox",
+  "name": "Maintainer Inbox",
+  "version": "0.1.0",
+  "author": "David Boulay",
+  "license": "MIT",
+  "description": "Every open issue and pull request on the repositories you own, with a desktop notification for each new one and each reply. Reads GitHub search directly, so watch settings and notifications marked read elsewhere can't hide anything.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Maintainer Inbox",
+    "description": "Issues and pull requests on your own repositories that are waiting on you, until you reply or dismiss them.",
+    "category": "Development",
+    "aliases": ["github", "issues", "pull requests", "maintainer"],
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "refreshIntervalMin": 5,
+      "owners": "",
+      "excludeBots": false,
+      "notify": true,
+      "hideWhenEmpty": false,
+      "staleAfterMin": 60
+    },
+    "schema": [
+      { "key": "refreshIntervalMin", "type": "integer", "label": "Check every (minutes)", "min": 1, "max": 120, "step": 1, "defaultValue": 5 },
+      { "key": "owners", "type": "string", "label": "Extra owners", "defaultValue": "", "description": "Comma-separated users or organizations whose repositories you also maintain. Your own account is always included." },
+      { "key": "excludeBots", "type": "boolean", "label": "Ignore bots", "defaultValue": false, "description": "Skip items opened by Dependabot, Renovate and other bot accounts." },
+      { "key": "notify", "type": "boolean", "label": "Desktop notifications", "defaultValue": true, "description": "One per new issue, pull request or reply; a single summary when more than three arrive at once." },
+      { "key": "hideWhenEmpty", "type": "boolean", "label": "Hide when nothing needs you", "defaultValue": false },
+      { "key": "staleAfterMin", "type": "integer", "label": "Warn after failing for (minutes)", "min": 10, "max": 1440, "step": 10, "defaultValue": 60, "description": "The widget turns urgent when GitHub could not be checked for this long, so silence never means a failed check." }
+    ]
+  }
+}
