@@ -18,6 +18,11 @@ Commands, all printing one JSON object on stdout:
   collect  --state FILE [--owners a,b] [--exclude-bots]
   dismiss  --state FILE --id NODE_ID      hide until the next outside activity
   restore  --state FILE --id NODE_ID
+  notify   --icon PATH                    one JSON payload on stdin; prints
+                                          the clicked action, if any
+
+Notification text goes through stdin and the session D-Bus, never argv, so
+private repository titles don't show up in process listings.
 
 Only the GitHub CLI's existing login is used; no token is read or stored.
 """
@@ -363,6 +368,47 @@ def set_flag(args, key, on):
     emit({"ok": True})
 
 
+def notify(args):
+    """Sends one desktop notification and waits for it to be clicked or closed.
+
+    Payload on stdin: {"summary", "body", "actions": [[key, label], ...]}.
+    Prints the invoked action key (as notify-send --action does), or nothing.
+    """
+    from gi.repository import Gio, GLib
+
+    payload = json.loads(sys.stdin.readline() or "{}")
+    actions = []
+    for key, label in payload.get("actions", []):
+        actions += [str(key), str(label)]
+    bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+    loop = GLib.MainLoop()
+    sent = {"id": None, "action": ""}
+
+    def on_signal(_conn, _sender, _path, _iface, signal, params):
+        nid = params[0]
+        if nid != sent["id"]:
+            return
+        if signal == "ActionInvoked":
+            sent["action"] = params[1]
+        loop.quit()
+
+    bus.signal_subscribe("org.freedesktop.Notifications", "org.freedesktop.Notifications",
+                         None, "/org/freedesktop/Notifications", None,
+                         Gio.DBusSignalFlags.NONE, on_signal)
+    reply = bus.call_sync("org.freedesktop.Notifications", "/org/freedesktop/Notifications",
+                          "org.freedesktop.Notifications", "Notify",
+                          GLib.Variant("(susssasa{sv}i)", ("Maintainer Inbox", 0, args.icon,
+                                                           str(payload.get("summary", "")),
+                                                           str(payload.get("body", "")),
+                                                           actions, {}, -1)),
+                          GLib.VariantType("(u)"), Gio.DBusCallFlags.NONE, -1, None)
+    sent["id"] = reply.unpack()[0]
+    if actions:
+        loop.run()
+    if sent["action"]:
+        print(sent["action"])
+
+
 def main():
     p = argparse.ArgumentParser()
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -375,9 +421,13 @@ def main():
         d = sub.add_parser(name)
         d.add_argument("--state", required=True)
         d.add_argument("--id", required=True)
+    n = sub.add_parser("notify")
+    n.add_argument("--icon", default="")
     args = p.parse_args()
     if args.cmd == "collect":
         collect(args)
+    elif args.cmd == "notify":
+        notify(args)
     elif args.cmd in ("dismiss", "restore"):
         set_flag(args, "dismissed", args.cmd == "dismiss")
     else:

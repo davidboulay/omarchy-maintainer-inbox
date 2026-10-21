@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.davidboulay.maintainer-inbox",
   "name": "Maintainer Inbox",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "author": "David Boulay",
   "license": "MIT",
   "description": "Every open issue and pull request on the repositories you maintain, plus replies in your conversations anywhere on GitHub, with a desktop notification for each. Reads GitHub search directly, so watch settings and notifications marked read elsewhere can't hide anything.",

@@ -27,7 +27,6 @@ Item {
   property double nowSec: Date.now() / 1000
 
   readonly property string pythonPath: "/usr/bin/python3"
-  readonly property string notifyPath: "/usr/bin/notify-send"
   readonly property int collectorTimeoutMs: 90000
   readonly property int maxOutputChars: 4194304
 
@@ -184,6 +183,9 @@ Item {
       id: notifier
       property string url: ""
       property string action: ""
+      property string payload: ""
+      stdinEnabled: true
+      onStarted: { write(payload); stdinEnabled = false }
       stdout: SplitParser { onRead: function (line) { notifier.action = String(line).trim() } }
       onExited: {
         if (action === "default" || action === "open") {
@@ -197,9 +199,11 @@ Item {
 
   function sendNotification(summary, body, url) {
     var p = notificationProcess.createObject(root, { url: url })
-    p.command = [notifyPath, "--app-name=Maintainer Inbox", "--app-icon=" + iconPath,
-                 "--action=default=Open", "--action=open=" + (url !== "" ? "Open on GitHub" : "Show inbox"),
-                 "--", summary, body]
+    // Titles of private repositories go through stdin, never argv, so they
+    // don't show up in other users' process listings.
+    p.payload = JSON.stringify({ summary: summary, body: body,
+                                 actions: [["default", "Open"], ["open", url !== "" ? "Open on GitHub" : "Show inbox"]] }) + "\n"
+    p.command = [pythonPath, helperPath, "notify", "--icon", iconPath]
     p.running = true
   }
 
